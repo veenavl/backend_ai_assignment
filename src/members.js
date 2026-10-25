@@ -44,3 +44,44 @@ export function changeGroup(store, { actorId, orgId, groupId, userId }) {
     return assignment;
   });
 }
+
+// Moves several users into groupId in one request ("Move selected" in the UI).
+// Returns a result per user so the UI can show partial failures.
+export function moveUsers(store, { actorId, orgId, groupId, userIds }) {
+  const actor = resolvePermissions(store, actorId, orgId);
+  if (!can(actor, 'groups.manage')) throw forbidden('You cannot change groups in this org.');
+
+  const target = getGroup(store, orgId, groupId);
+  if (!target) throw notFound('Group not found.');
+  if (target.system_key === 'owner' && actor.systemKey !== 'owner') {
+    throw forbidden('Only owners can make someone an owner.');
+  }
+
+  const owners = ownerCount(store, orgId);
+  const results = [];
+
+  for (const userId of new Set(userIds)) {
+    if (!membership(store, userId, orgId)) {
+      results.push({ userId, ok: false, error: 'not_found' });
+      continue;
+    }
+    const current = activeAssignment(store, userId, orgId);
+    if (current?.group_id === groupId) {
+      results.push({ userId, ok: true });
+      continue;
+    }
+    if (current) {
+      const currentGroup = getGroup(store, orgId, current.group_id);
+      if (currentGroup?.system_key === 'owner' && owners <= 1) {
+        results.push({ userId, ok: false, error: 'last_owner' });
+        continue;
+      }
+      current.deleted = true;
+    }
+    store.assignments.push({ org_id: orgId, user_id: userId, group_id: groupId, deleted: false, created_by: actorId });
+    results.push({ userId, ok: true });
+  }
+
+  store.audit_log.push({ org_id: orgId, actor_id: actorId, action: 'bulk_move', to: groupId, results });
+  return results;
+}
